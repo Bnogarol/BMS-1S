@@ -1,0 +1,234 @@
+// Código para TCC2 - BMS 1S
+// Aluno : Baruc Nogarol de Andrade - RA 2158558
+// Tema do TCC : Protótipo de um BMS microcontrolado
+
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>     //Biblioteca para usar o display
+#include <Adafruit_SSD1306.h> 
+#include <Adafruit_ADS1X15.h> //Biblioteca para o ADC
+#include <Thermistor.h>       //Biblioteca para usar o termistor
+#include <Adafruit_INA219.h>
+
+#define gnd 2    //Pino para controlar a alimentação do carregador
+#define mosfetD 3       //Pino para controlar o MOSFET (descarga)
+#define mosfetC 5       //Pino para controlar o MOSFET (carga)
+#define ledVerde 9
+#define ledVermelho 10
+
+#define SCREEN_WIDTH 128 // Largura do display OLED, em pixels
+#define SCREEN_HEIGHT 64 // Altura do display OLED, em pixels
+
+#define OLED_RESET     -1   // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 Display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+Adafruit_ADS1015 ads;      // Use this for the 12-bit version
+Adafruit_INA219 ina219;
+
+// ---------------------------- Variaveis auxiliares -------------------------------------
+
+int16_t adc0 = 0;                //Quantidade de Bits medidos no ADC
+float volts0, vCorrigido = 0.0;  //Conversão de bits para valor de tensão, 
+                                 //valor de tensão corrigido
+
+bool  descarregou = false;       //Variável auxiliar para controle de carga e descarga
+bool  *p = &descarregou;         //Ponteiro q aponta para o endereço da variável auxiliar
+
+String voltValue;                //Variável usada para enviar os sinais
+
+Thermistor term(A1);             //Pino analógico que está conectado ao NTC
+
+// ---------------------------------------------------------------------------------------
+
+//Função para acionar o MOSFET (fecha a chave)
+void    liga(int pino){
+  analogWrite(pino, 255);
+}
+ //Função para desligar o MOSFET (abre a chave)
+void desliga(int pino){
+  analogWrite(pino, 0);
+}
+
+void pisca(int pino, int vezes, int intervalo){
+  for(int i = 0; i <= vezes; i++){
+    digitalWrite(pino, true);
+    delay(intervalo * 1000);
+    digitalWrite(pino, false);
+    delay(intervalo * 1000);
+  }
+}
+
+//Função para carregar a bateria
+void carregando(){
+  desliga(mosfetD); //Desliga o MOSFET de descarga para garantir que a energia da bateria não
+                    //será consumida durante o carregamento.
+  int i = 0;
+  
+  while(true){ 
+    liga(mosfetC);              //Fecha o MOSFET para começar o carregamento
+
+    i++;
+    pisca(ledVermelho, 1, 1);
+
+    //Caso a tensão seja maior que 3.9 V, o carregamento é interrompido
+    if(i == 60){
+      if(volt(true) >= 3.900){
+       *p = false;                   //Muda a variável 'descarregou' para false.
+       loop();
+     }
+     i = 0;
+    }
+  }
+}
+
+// Função para descarregar a bateria
+void descarregando(){
+  desliga(mosfetC);
+
+  //Testa se a bateria já não está descarregada
+  if(volt(false) < 2.700){
+      *p = true;
+      loop();
+  }
+
+  int i = 0; //Variável auxiliar
+ 
+  while(true){
+    liga(mosfetD);    //MOSFET de descarga é acionado
+    
+    i++;
+    pisca(ledVerde, 1, 1);
+
+     if(i == 240){
+      if(volt(false) < 2.700){
+        *p = true;
+        loop();
+      }
+      i = 0;
+    }  
+  }
+}
+
+//Função para mostrar a tensão medida no display
+void printDisplay(float v, float a){
+
+  Display.setTextSize(1.5);      // Tamanho do texto no display
+  Display.setTextColor(WHITE); // Cor do texto
+  Display.setCursor(0, 28);
+
+  Display.clearDisplay(); // Limpa o display no início do loop
+  Display.print("C1:");
+  Display.print(v, 3);
+  Display.println(" V");
+  Display.print(a, 3);
+  Display.print(" mA");
+  Display.display();      // Mostra o que foi desenhado no display
+
+  // Opcional: Aguarda por um curto período antes de limpar o display
+  delay(100); // Aguarda 2 segundos
+
+  Display.clearDisplay(); // Limpa o display após o atraso
+}
+
+//Função para medir a tensão & temperatura na bateria
+float volt(bool carregando) {
+  
+  //---Leitura de corrente-----
+  float valorCorrente = ina219.getCurrent_mA();
+  //-------------------------------
+
+  desliga(mosfetD);
+  desliga(mosfetC);
+  digitalWrite(gnd, true);
+
+  delay(1000);
+
+  int temperatura = term.getTemp();        // Lê a temperatura
+  adc0 = ads.readADC_SingleEnded(0);       // Realiza a leitura de tensão (em bits)
+  volts0 = ads.computeVolts(adc0);         // Converte para o valor de tensão
+  vCorrigido = (volts0 * 2) - 0.04;        // Devido ao divisor resistivo, deve-se corrigir o valor da tensão lida
+
+  char buffer[20];
+  dtostrf(vCorrigido, 8, 3, buffer);       // Converte vCorrigido para uma string formatada com 3 casas decimais
+
+  char correnteBuffer[10];                      // Buffer para a corrente
+  dtostrf(valorCorrente, 8, 3, correnteBuffer); // Converte corrente para uma string formatada com 3 casas decimais
+
+  voltValue = String(buffer) + "|" + String(temperatura) + "|" + String(correnteBuffer); // Adiciona a corrente formatada
+
+  Serial.println(voltValue);
+  
+  digitalWrite(gnd, false);
+
+  printDisplay(vCorrigido, valorCorrente);
+  return vCorrigido;
+}
+
+void setup(void)
+{
+  Serial.begin(9600);
+  
+  ads.setGain(GAIN_TWOTHIRDS);  // Ganho 2/3. Mede entre ~= -6V e 6V
+
+   while (!Serial) {
+    // will pause Zero, Leonardo, etc until serial console opens
+    delay(1);
+  }
+
+  // Initialize the INA219.
+  // By default the initialization will use the largest range (32V, 2A).  However
+  // you can call a setCalibration function to change this range (see comments).
+  if (! ina219.begin()) {
+    Serial.println("Failed to find INA219 chip");
+    while (1) { delay(10); }
+  }
+
+  // Teste para inicializar o ADS
+  if (!ads.begin()) {
+    Serial.println("Failed to initialize ADS.");
+    while (1);
+  }
+
+  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  if(!Display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+
+  // Clear the buffer
+  Display.clearDisplay();
+
+  pinMode(mosfetD, OUTPUT);
+  pinMode(mosfetC, OUTPUT);
+  pinMode(gnd, OUTPUT);
+  pinMode(ledVerde, OUTPUT);
+  pinMode(ledVermelho, OUTPUT);
+}
+
+void loop(void)
+{
+  //----------Configs Iniciais------------
+  desliga(mosfetC);
+  desliga(mosfetD);
+  //--------------------------------------
+
+  if(descarregou == false){
+    digitalWrite(ledVerde, true);
+    delay(5000);
+    digitalWrite(ledVerde, false);
+    descarregando();
+  }
+
+  if(descarregou == true){
+    digitalWrite(ledVermelho, true);
+    delay(5000);
+    digitalWrite(ledVermelho, false);
+    carregando();
+  }
+
+  liga(mosfetC);
+  delay(240000);
+  volt(false);
+  
+}
